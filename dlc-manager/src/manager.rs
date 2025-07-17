@@ -383,6 +383,7 @@ where
         self.check_signed_contracts()?;
         self.check_confirmed_contracts()?;
         self.check_preclosed_contracts()?;
+        self.check_pending_close_transactions()?;
 
         if check_channels {
             self.channel_checks()?;
@@ -806,6 +807,42 @@ where
                 .update_contract(&Contract::Closed(closed_contract))?;
         }
 
+        Ok(())
+    }
+
+    /// Check for pending cooperative close transactions
+    fn check_pending_close_transactions(&self) -> Result<(), Error> {
+        // Get all Confirmed contracts that might have pending close transactions
+        for contract in self.store.get_confirmed_contracts()? {
+            // Skip channel contracts (they have their own monitoring)
+            if contract.channel_id.is_some() {
+                continue;
+            }
+
+            // Check each pending close transaction
+            for pending_close_tx in &contract.accepted_contract.dlc_transactions.pending_close_txs {
+                let confirmations = self
+                    .blockchain
+                    .get_transaction_confirmations(&pending_close_tx.compute_txid())?;
+
+                if confirmations >= NB_CONFIRMATIONS {
+                    // Found a fully confirmed pending close - move directly to Closed
+                    let pnl = contract.accepted_contract.compute_pnl(pending_close_tx)?;
+                    let closed_contract = ClosedContract {
+                        attestations: None, // Cooperative close has no attestations
+                        signed_cet: None,   // Cooperative close doesn't use a CET
+                        contract_id: contract.accepted_contract.get_contract_id(),
+                        temporary_contract_id: contract.accepted_contract.offered_contract.id,
+                        counter_party_id: contract.accepted_contract.offered_contract.counter_party,
+                        pnl,
+                    };
+
+                    self.store
+                        .update_contract(&Contract::Closed(closed_contract))?;
+                    break; // Only one close can be confirmed
+                }
+            }
+        }
         Ok(())
     }
 
