@@ -479,6 +479,7 @@ where
         close_msg: &CloseDlc,
         counter_party: &PublicKey,
     ) -> Result<(), Error> {
+        // Validate that the contract exists and is in the correct state
         let signed_contract = get_contract_in_state!(
             self,
             &close_msg.contract_id,
@@ -486,50 +487,17 @@ where
             Some(*counter_party)
         )?;
 
-        let close_tx = crate::contract_updater::complete_cooperative_close(
+        // Validate the close message by attempting to construct the close transaction
+        // This verifies the signature and transaction structure without broadcasting
+        let _close_tx = crate::contract_updater::complete_cooperative_close(
             &self.secp,
             &signed_contract,
             close_msg,
             &self.signer_provider,
         )?;
 
-        // Broadcast the closing transaction
-        self.blockchain.send_transaction(&close_tx)?;
-
-        // Update contract state to Closed
-        let closed_contract = ClosedContract {
-            attestations: None,
-            signed_cet: None,
-            contract_id: close_msg.contract_id,
-            temporary_contract_id: signed_contract.accepted_contract.offered_contract.id,
-            counter_party_id: *counter_party,
-            pnl: SignedAmount::from_sat(
-                if signed_contract
-                    .accepted_contract
-                    .offered_contract
-                    .is_offer_party
-                {
-                    close_msg.offer_payout.to_sat() as i64
-                        - signed_contract
-                            .accepted_contract
-                            .offered_contract
-                            .offer_params
-                            .collateral
-                            .to_sat() as i64
-                } else {
-                    close_msg.accept_payout.to_sat() as i64
-                        - signed_contract
-                            .accepted_contract
-                            .accept_params
-                            .collateral
-                            .to_sat() as i64
-                },
-            ),
-        };
-
-        self.store
-            .update_contract(&Contract::Closed(closed_contract))?;
-
+        // Message is valid - the application layer should call accept_cooperative_close()
+        // if they want to accept the offered terms
         Ok(())
     }
 
@@ -801,9 +769,26 @@ where
             .blockchain
             .get_transaction_confirmations(&broadcasted_txid)?;
         if confirmations >= NB_CONFIRMATIONS {
+            // Check if this is a cooperative close (no attestations) or a CET close (with attestations)
+            let (signed_cet, pnl) = if contract.attestations.is_none() {
+                // Cooperative close - no signed_cet in the final closed contract
+                let pnl = contract
+                    .signed_contract
+                    .accepted_contract
+                    .compute_pnl(&contract.signed_cet)?;
+                (None, pnl)
+            } else {
+                // CET close - include the signed_cet
+                let pnl = contract
+                    .signed_contract
+                    .accepted_contract
+                    .compute_pnl(&contract.signed_cet)?;
+                (Some(contract.signed_cet.clone()), pnl)
+            };
+
             let closed_contract = ClosedContract {
                 attestations: contract.attestations.clone(),
-                signed_cet: Some(contract.signed_cet.clone()),
+                signed_cet,
                 contract_id: contract.signed_contract.accepted_contract.get_contract_id(),
                 temporary_contract_id: contract
                     .signed_contract
@@ -815,10 +800,7 @@ where
                     .accepted_contract
                     .offered_contract
                     .counter_party,
-                pnl: contract
-                    .signed_contract
-                    .accepted_contract
-                    .compute_pnl(&contract.signed_cet)?,
+                pnl,
             };
             self.store
                 .update_contract(&Contract::Closed(closed_contract))?;
@@ -970,19 +952,36 @@ where
         let signed_contract =
             get_contract_in_state!(self, contract_id, Confirmed, None as Option<PublicKey>)?;
 
-        let (close_message, _close_tx) = crate::contract_updater::create_cooperative_close(
+        let (close_message, close_tx) = crate::contract_updater::create_cooperative_close(
             &self.secp,
             &signed_contract,
             counter_payout,
             &self.signer_provider,
         )?;
 
+        // Create updated contract with pending close transaction
+        let mut updated_dlc_transactions = signed_contract.accepted_contract.dlc_transactions.clone();
+        updated_dlc_transactions.pending_close_txs.push(close_tx.clone());
+
+        let updated_accepted_contract = AcceptedContract {
+            dlc_transactions: updated_dlc_transactions,
+            ..signed_contract.accepted_contract.clone()
+        };
+
+        let updated_signed_contract = SignedContract {
+            accepted_contract: updated_accepted_contract,
+            ..signed_contract.clone()
+        };
+
+        // Update contract state to track pending close
+        self.store
+            .update_contract(&Contract::Confirmed(updated_signed_contract))?;
+
         let counter_party = signed_contract
             .accepted_contract
             .offered_contract
             .counter_party;
 
-        // Don't update contract state - keep it in Confirmed until close tx is broadcast
         Ok((close_message, counter_party))
     }
 
@@ -1006,42 +1005,15 @@ where
         // Broadcast the closing transaction
         self.blockchain.send_transaction(&close_tx)?;
 
-        // Update contract state to Closed
-        let closed_contract = ClosedContract {
+        // Create PreClosed contract (transaction broadcast but not confirmed yet)
+        let preclosed_contract = PreClosedContract {
+            signed_contract,
             attestations: None,
-            signed_cet: None,
-            contract_id: *contract_id,
-            temporary_contract_id: signed_contract.accepted_contract.offered_contract.id,
-            counter_party_id: signed_contract
-                .accepted_contract
-                .offered_contract
-                .counter_party,
-            pnl: SignedAmount::from_sat(
-                if signed_contract
-                    .accepted_contract
-                    .offered_contract
-                    .is_offer_party
-                {
-                    close_message.offer_payout.to_sat() as i64
-                        - signed_contract
-                            .accepted_contract
-                            .offered_contract
-                            .offer_params
-                            .collateral
-                            .to_sat() as i64
-                } else {
-                    close_message.accept_payout.to_sat() as i64
-                        - signed_contract
-                            .accepted_contract
-                            .accept_params
-                            .collateral
-                            .to_sat() as i64
-                },
-            ),
+            signed_cet: close_tx,
         };
 
         self.store
-            .update_contract(&Contract::Closed(closed_contract))?;
+            .update_contract(&Contract::PreClosed(preclosed_contract))?;
 
         Ok(())
     }

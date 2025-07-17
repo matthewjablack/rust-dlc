@@ -903,20 +903,75 @@ fn manager_execution_test(test_params: TestParams, path: TestPath, manual_close:
                         .accept_cooperative_close(&contract_id, &close_msg)
                         .expect("Error accepting cooperative close");
 
-                    // Bob should now be in Closed state (he broadcast the transaction)
-                    assert_contract_state!(bob_manager_send, contract_id, Closed);
+                    // Bob should now be in PreClosed state (he broadcast the transaction)
+                    assert_contract_state!(bob_manager_send, contract_id, PreClosed);
 
                     // Alice should still be in Confirmed state (she doesn't know about the close yet)
                     assert_contract_state!(alice_manager_send, contract_id, Confirmed);
 
+                    // Mine blocks to confirm the close transaction and trigger state transition
+                    generate_blocks(6);
+
+                    // Check contracts to move from PreClosed to Closed after confirmations
+                    periodic_check!(bob_manager_send, contract_id, Closed);
+
+                    // Bob should now be in Closed state (transaction is now confirmed)
+                    assert_contract_state!(bob_manager_send, contract_id, Closed);
+
+                    // Simulate Alice detecting the close transaction on the blockchain
+                    // In a real implementation, this would be done through chain monitoring
+                    let close_tx = {
+                        let alice_contract = alice_manager_send
+                            .lock()
+                            .unwrap()
+                            .get_store()
+                            .get_contract(&contract_id)
+                            .unwrap()
+                            .unwrap();
+                        if let Contract::Confirmed(ref signed_contract) = alice_contract {
+                            // Use the same logic as Bob to create the close transaction
+                            dlc::channel::create_collaborative_close_transaction(
+                                &signed_contract.accepted_contract.offered_contract.offer_params,
+                                close_msg.offer_payout,
+                                &signed_contract.accepted_contract.accept_params,
+                                close_msg.accept_payout,
+                                signed_contract.accepted_contract.dlc_transactions.get_fund_outpoint(),
+                                signed_contract.accepted_contract.dlc_transactions.get_fund_output().value,
+                            )
+                        } else {
+                            panic!("Alice's contract should be in Confirmed state");
+                        }
+                    };
+
                     // Mine a block to confirm the close transaction
                     generate_blocks(1);
 
-                    // In a real scenario, Alice would detect the close transaction and call on_counterparty_close
-                    // For the test, we'll verify the cooperative close functionality worked correctly
+                    // Alice detects the close transaction and updates her state
+                    let close_txid = close_tx.compute_txid();
+                    let confirmations = electrs.get_transaction_confirmations(&close_txid).unwrap();
 
-                    // Verify Bob is still in Closed state after confirmation
+                    // Alice calls on_counterparty_close when she detects the transaction
+                    let alice_contract_before = alice_manager_send
+                        .lock()
+                        .unwrap()
+                        .get_store()
+                        .get_contract(&contract_id)
+                        .unwrap()
+                        .unwrap();
+
+                    if let Contract::Confirmed(ref signed_contract) = alice_contract_before {
+                        alice_manager_send
+                            .lock()
+                            .unwrap()
+                            .on_counterparty_close(signed_contract, close_tx.clone(), confirmations)
+                            .expect("Error processing counterparty close");
+                    } else {
+                        panic!("Alice's contract should be in Confirmed state before detection");
+                    }
+
+                    // Verify both parties are now in Closed state after confirmation
                     assert_contract_state!(bob_manager_send, contract_id, Closed);
+                    assert_contract_state!(alice_manager_send, contract_id, Closed);
 
                     // Verify the close transaction was properly broadcast and confirmed
                     let _close_txid = {
