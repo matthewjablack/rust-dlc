@@ -94,7 +94,7 @@ pub struct RevokeParams {
     /// Key used to restrict the transaction output path.
     pub own_pk: PublicKey,
     /// Key used to restrict the transaction output path and for generating
-    /// an adaptor signature, that gets revealed when using the transaction.  
+    /// an adaptor signature, that gets revealed when using the transaction.
     pub publish_pk: PublicKey,
     /// Key used to revoke the transaction.
     pub revoke_pk: PublicKey,
@@ -559,13 +559,26 @@ pub fn create_collaborative_close_transaction(
     accept_payout: Amount,
     fund_outpoint: OutPoint,
     _fund_output_amount: Amount,
+    funding_inputs: Option<&[crate::TxInputInfo]>,
 ) -> Transaction {
-    let input = TxIn {
+    let mut inputs = vec![TxIn {
         previous_output: fund_outpoint,
         witness: Witness::default(),
         script_sig: ScriptBuf::default(),
         sequence: crate::util::DISABLE_LOCKTIME,
-    };
+    }];
+
+    // Add funding inputs if provided
+    if let Some(funding_inputs) = funding_inputs {
+        for funding_input in funding_inputs {
+            inputs.push(TxIn {
+                previous_output: funding_input.outpoint,
+                witness: Witness::default(),
+                script_sig: crate::util::redeem_script_to_script_sig(&funding_input.redeem_script),
+                sequence: crate::util::DISABLE_LOCKTIME,
+            });
+        }
+    }
 
     //TODO(tibo): add fee re-payment
     let offer_output = TxOut {
@@ -589,7 +602,7 @@ pub fn create_collaborative_close_transaction(
     Transaction {
         version: crate::TX_VERSION,
         lock_time: LockTime::ZERO,
-        input: vec![input],
+        input: inputs,
         output,
     }
 }
@@ -970,5 +983,104 @@ mod tests {
             &adaptor_sig,
         )
         .expect("the signature to be valid");
+    }
+
+    #[test]
+    fn create_collaborative_close_transaction_with_funding_inputs_test() {
+        use bitcoin::{Txid};
+        use std::str::FromStr;
+
+        // Create dummy party params
+        let offer_params = crate::PartyParams {
+            fund_pubkey: bitcoin::PublicKey::from_str("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798").unwrap(),
+            change_script_pubkey: bitcoin::ScriptBuf::new(),
+            change_serial_id: 0,
+            payout_script_pubkey: bitcoin::ScriptBuf::new(),
+            payout_serial_id: 0,
+            inputs: vec![],
+            input_amount: bitcoin::Amount::ZERO,
+            collateral: bitcoin::Amount::ZERO,
+        };
+
+        let accept_params = crate::PartyParams {
+            fund_pubkey: bitcoin::PublicKey::from_str("02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9").unwrap(),
+            change_script_pubkey: bitcoin::ScriptBuf::new(),
+            change_serial_id: 1,
+            payout_script_pubkey: bitcoin::ScriptBuf::new(),
+            payout_serial_id: 1,
+            inputs: vec![],
+            input_amount: bitcoin::Amount::ZERO,
+            collateral: bitcoin::Amount::ZERO,
+        };
+
+        let fund_outpoint = bitcoin::OutPoint {
+            txid: Txid::from_str("83266d6b22a9babf6ee469b88fd0d3a0c690525f7c903aff22ec8ee44214604f").unwrap(),
+            vout: 0,
+        };
+
+        // Create some funding inputs
+        let funding_inputs = vec![
+            crate::TxInputInfo {
+                outpoint: bitcoin::OutPoint {
+                    txid: Txid::from_str("bc92a22f07ef23c53af343397874b59f5f8c0eb37753af1d1a159a2177d4bb98").unwrap(),
+                    vout: 0,
+                },
+                max_witness_len: 108,
+                redeem_script: bitcoin::ScriptBuf::new(),
+                serial_id: 1,
+            },
+            crate::TxInputInfo {
+                outpoint: bitcoin::OutPoint {
+                    txid: Txid::from_str("5df6e0e2761359d30a8275058e299fcc0381534545f55cf43e41983f5d4c9456").unwrap(),
+                    vout: 1,
+                },
+                max_witness_len: 107,
+                redeem_script: bitcoin::ScriptBuf::new(),
+                serial_id: 2,
+            },
+        ];
+
+        // Test without funding inputs
+        let tx_without = create_collaborative_close_transaction(
+            &offer_params,
+            bitcoin::Amount::from_sat(50000),
+            &accept_params,
+            bitcoin::Amount::from_sat(50000),
+            fund_outpoint,
+            bitcoin::Amount::from_sat(100000),
+            None,
+        );
+
+        // Test with funding inputs
+        let tx_with = create_collaborative_close_transaction(
+            &offer_params,
+            bitcoin::Amount::from_sat(50000),
+            &accept_params,
+            bitcoin::Amount::from_sat(50000),
+            fund_outpoint,
+            bitcoin::Amount::from_sat(100000),
+            Some(&funding_inputs),
+        );
+
+        // Verify basic properties
+        assert_eq!(tx_without.input.len(), 1);
+        assert_eq!(tx_with.input.len(), 3); // 1 fund input + 2 funding inputs
+        assert_eq!(tx_without.output.len(), tx_with.output.len()); // Same outputs
+
+        // Verify the funding input is first
+        assert_eq!(tx_with.input[0].previous_output, fund_outpoint);
+
+        // Verify additional inputs are added
+        assert_eq!(tx_with.input[1].previous_output, funding_inputs[0].outpoint);
+        assert_eq!(tx_with.input[2].previous_output, funding_inputs[1].outpoint);
+
+        // Verify script_sig is set correctly for funding inputs
+        assert_eq!(tx_with.input[1].script_sig, crate::util::redeem_script_to_script_sig(&funding_inputs[0].redeem_script));
+        assert_eq!(tx_with.input[2].script_sig, crate::util::redeem_script_to_script_sig(&funding_inputs[1].redeem_script));
+
+        // Verify all inputs have correct sequence
+        for input in &tx_with.input {
+            assert_eq!(input.sequence, crate::util::DISABLE_LOCKTIME);
+        }
     }
 }

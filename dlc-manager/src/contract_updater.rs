@@ -790,6 +790,7 @@ where
         counter_payout,
         fund_outpoint,
         fund_output_value,
+        None, // No additional funding inputs for now
     );
 
     // Get our private key and sign the transaction
@@ -836,6 +837,7 @@ where
     let fund_outpoint = accepted_contract.dlc_transactions.get_fund_outpoint();
 
     // Recreate the close transaction to verify
+    let funding_input_infos: Vec<dlc::TxInputInfo> = close_message.funding_inputs.iter().map(|fi| fi.into()).collect();
     let mut close_tx = dlc::channel::create_collaborative_close_transaction(
         &offered_contract.offer_params,
         close_message.offer_payout,
@@ -843,6 +845,7 @@ where
         close_message.accept_payout,
         fund_outpoint,
         fund_output_value,
+        Some(&funding_input_infos), // Use funding inputs from close message
     );
 
     // Get our private key

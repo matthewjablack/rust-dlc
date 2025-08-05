@@ -1800,6 +1800,7 @@ where
             vout: signed_channel.fund_output_index as u32,
         },
         fund_output_value,
+        None, // No additional funding inputs for now
     );
 
     let keys_id = signed_channel
@@ -1875,6 +1876,7 @@ where
             vout: signed_channel.fund_output_index as u32,
         },
         fund_output_value,
+        None, // No additional funding inputs for now
     );
 
     let mut state = SignedChannelState::CollaborativeCloseOffered {
