@@ -1785,14 +1785,11 @@ where
         ));
     }
 
-    let total_collateral =
-        signed_channel.own_params.collateral + signed_channel.counter_params.collateral;
-    let offer_payout = total_collateral - counter_payout;
+    // offer_payout is calculated inside create_collaborative_close_transaction
     let fund_output_value = signed_channel.fund_tx.output[signed_channel.fund_output_index].value;
 
     let close_tx = dlc::channel::create_collaborative_close_transaction(
         &signed_channel.own_params,
-        offer_payout,
         &signed_channel.counter_params,
         counter_payout,
         OutPoint {
@@ -1800,7 +1797,8 @@ where
             vout: signed_channel.fund_output_index as u32,
         },
         fund_output_value,
-    );
+        signed_channel.fee_rate_per_vb,
+    )?;
 
     let keys_id = signed_channel
         .keys_id()
@@ -1862,12 +1860,11 @@ where
         ));
     }
 
-    let offer_payout = total_collateral - close_offer.counter_payout;
+    // offer_payout is calculated inside create_collaborative_close_transaction
     let fund_output_value = signed_channel.fund_tx.output[signed_channel.fund_output_index].value;
 
     let close_tx = dlc::channel::create_collaborative_close_transaction(
         &signed_channel.counter_params,
-        offer_payout,
         &signed_channel.own_params,
         close_offer.counter_payout,
         OutPoint {
@@ -1875,7 +1872,8 @@ where
             vout: signed_channel.fund_output_index as u32,
         },
         fund_output_value,
-    );
+        signed_channel.fee_rate_per_vb,
+    )?;
 
     let mut state = SignedChannelState::CollaborativeCloseOffered {
         counter_payout: close_offer.counter_payout,

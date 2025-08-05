@@ -554,12 +554,12 @@ pub fn create_and_sign_punish_settle_transaction<C: Signing>(
 /// Create a transaction for collaboratively closing a channel.
 pub fn create_collaborative_close_transaction(
     offer_params: &PartyParams,
-    offer_payout: Amount,
     accept_params: &PartyParams,
     accept_payout: Amount,
     fund_outpoint: OutPoint,
-    _fund_output_amount: Amount,
-) -> Transaction {
+    fund_output_amount: Amount,
+    fee_rate_per_vb: u64,
+) -> Result<Transaction, Error> {
     let input = TxIn {
         previous_output: fund_outpoint,
         witness: Witness::default(),
@@ -567,31 +567,73 @@ pub fn create_collaborative_close_transaction(
         sequence: crate::util::DISABLE_LOCKTIME,
     };
 
-    //TODO(tibo): add fee re-payment
-    let offer_output = TxOut {
-        value: offer_payout,
-        script_pubkey: offer_params.payout_script_pubkey.clone(),
-    };
+    // Calculate fee for collaborative close transaction
+    // Similar to CET fee calculation but for both outputs combined
+    // Base weight: CET_BASE_WEIGHT (full weight since we're calculating for both parties)
+    let base_weight = crate::CET_BASE_WEIGHT;
+    
+    // Calculate output weights based on who gets what
+    let mut total_output_weight: usize = 0;
+    
+    // Determine who gets what based on accept_payout
+    let offer_payout = fund_output_amount - accept_payout;
+    
+    if offer_payout > Amount::ZERO {
+        let offer_output_weight = offer_params.payout_script_pubkey.len().checked_mul(4).ok_or(crate::Error::InvalidArgument)?;
+        total_output_weight = total_output_weight.checked_add(offer_output_weight).ok_or(crate::Error::InvalidArgument)?;
+    }
+    
+    if accept_payout > Amount::ZERO {
+        let accept_output_weight = accept_params.payout_script_pubkey.len().checked_mul(4).ok_or(crate::Error::InvalidArgument)?;
+        total_output_weight = total_output_weight.checked_add(accept_output_weight).ok_or(crate::Error::InvalidArgument)?;
+    }
+    
+    let total_weight = base_weight.checked_add(total_output_weight).ok_or(crate::Error::InvalidArgument)?;
+    let total_fee = crate::util::weight_to_fee(total_weight, fee_rate_per_vb)?;
+    
+    // Calculate final payouts after subtracting fees
+    let total_available = fund_output_amount - total_fee;
+    let final_offer_payout = total_available - accept_payout;
+    
+    // Ensure payouts are valid
+    if final_offer_payout < Amount::ZERO || accept_payout < Amount::ZERO {
+        return Err(crate::Error::InvalidArgument);
+    }
 
-    let accept_output = TxOut {
-        value: accept_payout,
-        script_pubkey: accept_params.payout_script_pubkey.clone(),
-    };
+    // Build outputs based on who gets what
+    let mut outputs = Vec::new();
+    
+    // Add offer output if they get something above dust limit
+    if final_offer_payout >= crate::DUST_LIMIT {
+        outputs.push(TxOut {
+            value: final_offer_payout,
+            script_pubkey: offer_params.payout_script_pubkey.clone(),
+        });
+    }
+    
+    // Add accept output if they get something above dust limit
+    if accept_payout >= crate::DUST_LIMIT {
+        outputs.push(TxOut {
+            value: accept_payout,
+            script_pubkey: accept_params.payout_script_pubkey.clone(),
+        });
+    }
+    
+    // Sort outputs by serial ID if both exist
+    if outputs.len() == 2 {
+        if offer_params.payout_serial_id > accept_params.payout_serial_id {
+            outputs.swap(0, 1);
+        }
+    }
 
-    let mut output: Vec<TxOut> = if offer_params.payout_serial_id < accept_params.payout_serial_id {
-        vec![offer_output, accept_output]
-    } else {
-        vec![accept_output, offer_output]
-    };
+    let output = crate::util::discard_dust(outputs, crate::DUST_LIMIT);
 
-    output = crate::util::discard_dust(output, crate::DUST_LIMIT);
-
-    Transaction {
+    Ok(Transaction {
         version: crate::TX_VERSION,
         lock_time: LockTime::ZERO,
         input: vec![input],
         output,
-    }
+    })
 }
 
 /// Returns a descriptor for a buffer transaction.

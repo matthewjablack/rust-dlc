@@ -1009,6 +1009,7 @@ where
             &signed_contract,
             counter_payout,
             &self.signer_provider,
+            None, // No additional funding inputs for now
         )?;
 
         // Create updated contract with pending close transaction
